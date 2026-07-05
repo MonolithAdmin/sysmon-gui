@@ -1,0 +1,412 @@
+cat > ~/bin/sysmon-gui <<'PY'
+#!/usr/bin/env python3
+import subprocess
+import tkinter as tk
+from tkinter import ttk
+import shutil
+import time
+
+UPDATE_MS = 1000
+ROOT_MOUNT = "/"
+last_cpu = None
+
+
+def read_cpu_percent():
+    global last_cpu
+
+    with open("/proc/stat", "r") as f:
+        line = f.readline()
+
+    parts = line.split()
+    values = list(map(int, parts[1:]))
+
+    idle = values[3] + values[4]
+    total = sum(values)
+
+    if last_cpu is None:
+        last_cpu = (idle, total)
+        return 0.0
+
+    last_idle, last_total = last_cpu
+    idle_delta = idle - last_idle
+    total_delta = total - last_total
+    last_cpu = (idle, total)
+
+    if total_delta == 0:
+        return 0.0
+
+    return max(0.0, min(100.0, 100.0 * (1.0 - idle_delta / total_delta)))
+
+
+def read_ram():
+    mem = {}
+
+    with open("/proc/meminfo", "r") as f:
+        for line in f:
+            key, value = line.split(":", 1)
+            mem[key] = int(value.strip().split()[0]) * 1024
+
+    total = mem.get("MemTotal", 0)
+    available = mem.get("MemAvailable", 0)
+    used = total - available
+    percent = used / total * 100 if total else 0
+
+    return used, total, percent
+
+
+def read_disk():
+    usage = shutil.disk_usage(ROOT_MOUNT)
+    used = usage.used
+    total = usage.total
+    free = usage.free
+    percent = used / total * 100 if total else 0
+    return used, total, free, percent
+
+
+def human_bytes(num):
+    for unit in ["B", "KB", "MB", "GB", "TB"]:
+        if abs(num) < 1024:
+            return f"{num:,.1f} {unit}"
+        num /= 1024
+    return f"{num:,.1f} PB"
+
+
+def safe_float(value, default=0.0):
+    try:
+        cleaned = str(value).strip()
+        if cleaned in ["N/A", "[N/A]", "Not Supported", "[Not Supported]", ""]:
+            return default
+        return float(cleaned)
+    except Exception:
+        return default
+
+
+def clamp(value, low=0.0, high=100.0):
+    return max(low, min(high, value))
+
+
+def read_gpus():
+    query = (
+        "index,"
+        "name,"
+        "pci.bus_id,"
+        "display_active,"
+        "pstate,"
+        "utilization.gpu,"
+        "utilization.memory,"
+        "memory.used,"
+        "memory.total,"
+        "temperature.gpu,"
+        "temperature.gpu.tlimit,"
+        "power.draw,"
+        "power.limit,"
+        "fan.speed,"
+        "clocks.gr,"
+        "clocks.mem"
+    )
+
+    cmd = [
+        "nvidia-smi",
+        f"--query-gpu={query}",
+        "--format=csv,noheader,nounits",
+    ]
+
+    try:
+        result = subprocess.run(cmd, text=True, capture_output=True, timeout=3)
+    except Exception as e:
+        return [{"error": str(e)}]
+
+    if result.returncode != 0:
+        return [{"error": result.stderr.strip() or "nvidia-smi failed"}]
+
+    gpus = []
+
+    for line in result.stdout.strip().splitlines():
+        parts = [p.strip() for p in line.split(",")]
+
+        if len(parts) < 16:
+            continue
+
+        index = parts[0]
+        name = parts[1]
+        bus_id = parts[2]
+        display_active = parts[3]
+        pstate = parts[4]
+
+        gpu_util = safe_float(parts[5])
+        mem_util = safe_float(parts[6])
+
+        mem_used = safe_float(parts[7])
+        mem_total = safe_float(parts[8])
+        mem_percent = mem_used / mem_total * 100 if mem_total else 0
+
+        temp = safe_float(parts[9])
+        temp_limit = safe_float(parts[10], 100.0)
+        temp_percent = temp / temp_limit * 100 if temp_limit else temp
+
+        power_draw = safe_float(parts[11])
+        power_limit = safe_float(parts[12])
+        power_percent = power_draw / power_limit * 100 if power_limit else 0
+
+        fan_speed = safe_float(parts[13])
+        graphics_clock = safe_float(parts[14])
+        memory_clock = safe_float(parts[15])
+
+        graphics_clock_percent = graphics_clock / 2000 * 100 if graphics_clock else 0
+        memory_clock_percent = memory_clock / 4500 * 100 if memory_clock else 0
+
+        gpus.append({
+            "index": index,
+            "name": name,
+            "bus_id": bus_id,
+            "display_active": display_active,
+            "pstate": pstate,
+            "gpu_util": clamp(gpu_util),
+            "mem_util": clamp(mem_util),
+            "mem_used": mem_used,
+            "mem_total": mem_total,
+            "mem_percent": clamp(mem_percent),
+            "temp": temp,
+            "temp_limit": temp_limit,
+            "temp_percent": clamp(temp_percent),
+            "power_draw": power_draw,
+            "power_limit": power_limit,
+            "power_percent": clamp(power_percent),
+            "fan_speed": clamp(fan_speed),
+            "graphics_clock": graphics_clock,
+            "graphics_clock_percent": clamp(graphics_clock_percent),
+            "memory_clock": memory_clock,
+            "memory_clock_percent": clamp(memory_clock_percent),
+        })
+
+    return gpus
+
+
+class SysMonApp:
+    def __init__(self, root):
+        self.root = root
+        self.root.title("LLLM SysMon")
+        self.root.geometry("900x820")
+        self.root.minsize(780, 650)
+
+        self.style = ttk.Style()
+        self.style.theme_use("clam")
+
+        self.main = ttk.Frame(root, padding=14)
+        self.main.pack(fill="both", expand=True)
+
+        title = ttk.Label(
+            self.main,
+            text="Ubuntu AI Rig Monitor",
+            font=("Sans", 18, "bold"),
+        )
+        title.pack(anchor="w", pady=(0, 10))
+
+        self.status_label = ttk.Label(
+            self.main,
+            text="Updating every 1 second",
+            font=("Sans", 10),
+        )
+        self.status_label.pack(anchor="w", pady=(0, 8))
+
+        self.cpu_frame = self.create_section("CPU")
+        self.cpu_label, self.cpu_bar = self.create_simple_meter(self.cpu_frame)
+
+        self.ram_frame = self.create_section("RAM")
+        self.ram_label, self.ram_bar = self.create_simple_meter(self.ram_frame)
+
+        self.disk_frame = self.create_section("Disk /")
+        self.disk_label, self.disk_bar = self.create_simple_meter(self.disk_frame)
+
+        self.gpu_parent = ttk.Frame(self.main)
+        self.gpu_parent.pack(fill="both", expand=True, pady=(8, 0))
+
+        self.gpu_cards = {}
+        self.current_gpu_signature = None
+
+        self.footer = ttk.Label(self.main, text="", font=("Sans", 9))
+        self.footer.pack(anchor="w", pady=(12, 0))
+
+        self.update_loop()
+
+    def create_section(self, name):
+        frame = ttk.LabelFrame(self.main, text=name, padding=10)
+        frame.pack(fill="x", pady=5)
+        return frame
+
+    def create_simple_meter(self, parent):
+        label = ttk.Label(parent, text="Loading...", font=("Sans", 10))
+        label.pack(anchor="w")
+
+        bar = ttk.Progressbar(parent, orient="horizontal", mode="determinate", maximum=100)
+        bar.pack(fill="x", pady=(4, 0))
+
+        return label, bar
+
+    def create_metric_row(self, parent):
+        row = ttk.Frame(parent)
+        row.pack(fill="x", pady=3)
+
+        label = ttk.Label(row, text="Loading...", width=42, anchor="w")
+        label.pack(side="left")
+
+        bar = ttk.Progressbar(row, orient="horizontal", mode="determinate", maximum=100)
+        bar.pack(side="left", fill="x", expand=True, padx=(8, 0))
+
+        return label, bar
+
+    def rebuild_gpu_cards(self, gpus):
+        for child in self.gpu_parent.winfo_children():
+            child.destroy()
+
+        self.gpu_cards = {}
+
+        if not gpus:
+            frame = ttk.LabelFrame(self.gpu_parent, text="GPUs", padding=10)
+            frame.pack(fill="x", pady=5)
+            ttk.Label(frame, text="No Nvidia GPUs detected.").pack(anchor="w")
+            return
+
+        if "error" in gpus[0]:
+            frame = ttk.LabelFrame(self.gpu_parent, text="GPUs", padding=10)
+            frame.pack(fill="x", pady=5)
+            ttk.Label(frame, text=f"GPU error: {gpus[0]['error']}").pack(anchor="w")
+            return
+
+        for gpu in gpus:
+            idx = gpu["index"]
+
+            frame = ttk.LabelFrame(
+                self.gpu_parent,
+                text=f"GPU {idx} - {gpu['name']}",
+                padding=10,
+            )
+            frame.pack(fill="x", pady=6)
+
+            info_label = ttk.Label(frame, text="", font=("Sans", 9))
+            info_label.pack(anchor="w", pady=(0, 6))
+
+            rows = {
+                "gpu_util": self.create_metric_row(frame),
+                "mem_util": self.create_metric_row(frame),
+                "vram": self.create_metric_row(frame),
+                "temp": self.create_metric_row(frame),
+                "power": self.create_metric_row(frame),
+                "fan": self.create_metric_row(frame),
+                "graphics_clock": self.create_metric_row(frame),
+                "memory_clock": self.create_metric_row(frame),
+            }
+
+            self.gpu_cards[idx] = {
+                "frame": frame,
+                "info": info_label,
+                "rows": rows,
+            }
+
+    def update_gpu_cards(self, gpus):
+        if not gpus or "error" in gpus[0]:
+            signature = "error"
+        else:
+            signature = tuple((gpu["index"], gpu["name"], gpu["bus_id"]) for gpu in gpus)
+
+        if signature != self.current_gpu_signature:
+            self.current_gpu_signature = signature
+            self.rebuild_gpu_cards(gpus)
+
+        if not gpus or "error" in gpus[0]:
+            return
+
+        for gpu in gpus:
+            idx = gpu["index"]
+            card = self.gpu_cards.get(idx)
+            if not card:
+                continue
+
+            card["info"].config(
+                text=(
+                    f"Bus: {gpu['bus_id']} | "
+                    f"Display: {gpu['display_active']} | "
+                    f"P-State: {gpu['pstate']}"
+                )
+            )
+
+            updates = {
+                "gpu_util": (
+                    f"GPU Utilization: {gpu['gpu_util']:.0f}%",
+                    gpu["gpu_util"],
+                ),
+                "mem_util": (
+                    f"Memory Controller Util: {gpu['mem_util']:.0f}%",
+                    gpu["mem_util"],
+                ),
+                "vram": (
+                    f"VRAM Usage: {gpu['mem_used']:.0f} / {gpu['mem_total']:.0f} MB ({gpu['mem_percent']:.0f}%)",
+                    gpu["mem_percent"],
+                ),
+                "temp": (
+                    f"Temperature: {gpu['temp']:.0f}°C / limit {gpu['temp_limit']:.0f}°C",
+                    gpu["temp_percent"],
+                ),
+                "power": (
+                    f"Power Draw: {gpu['power_draw']:.1f} W / limit {gpu['power_limit']:.1f} W",
+                    gpu["power_percent"],
+                ),
+                "fan": (
+                    f"Fan Speed: {gpu['fan_speed']:.0f}%",
+                    gpu["fan_speed"],
+                ),
+                "graphics_clock": (
+                    f"Graphics Clock: {gpu['graphics_clock']:.0f} MHz",
+                    gpu["graphics_clock_percent"],
+                ),
+                "memory_clock": (
+                    f"Memory Clock: {gpu['memory_clock']:.0f} MHz",
+                    gpu["memory_clock_percent"],
+                ),
+            }
+
+            for key, (text, value) in updates.items():
+                label, bar = card["rows"][key]
+                label.config(text=text)
+                bar["value"] = value
+
+    def update_loop(self):
+        try:
+            cpu = read_cpu_percent()
+            self.cpu_label.config(text=f"CPU usage: {cpu:.1f}%")
+            self.cpu_bar["value"] = cpu
+
+            ram_used, ram_total, ram_percent = read_ram()
+            self.ram_label.config(
+                text=f"RAM usage: {human_bytes(ram_used)} / {human_bytes(ram_total)} ({ram_percent:.1f}%)"
+            )
+            self.ram_bar["value"] = ram_percent
+
+            disk_used, disk_total, disk_free, disk_percent = read_disk()
+            self.disk_label.config(
+                text=(
+                    f"Disk usage: {human_bytes(disk_used)} / {human_bytes(disk_total)} "
+                    f"({disk_percent:.1f}%) | Free: {human_bytes(disk_free)}"
+                )
+            )
+            self.disk_bar["value"] = disk_percent
+
+            gpus = read_gpus()
+            self.update_gpu_cards(gpus)
+
+            now = time.strftime("%Y-%m-%d %H:%M:%S")
+            self.footer.config(text=f"Last updated: {now}")
+
+        except Exception as e:
+            self.footer.config(text=f"Error: {e}")
+
+        self.root.after(UPDATE_MS, self.update_loop)
+
+
+if __name__ == "__main__":
+    root = tk.Tk()
+    app = SysMonApp(root)
+    root.mainloop()
+PY
+
+chmod +x ~/bin/sysmon-gui

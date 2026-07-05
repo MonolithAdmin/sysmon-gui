@@ -182,17 +182,61 @@ def read_gpus():
     return gpus
 
 
+class ScrollableFrame(ttk.Frame):
+    def __init__(self, parent):
+        super().__init__(parent)
+
+        self.canvas = tk.Canvas(self, borderwidth=0, highlightthickness=0)
+        self.scrollbar = ttk.Scrollbar(self, orient="vertical", command=self.canvas.yview)
+        self.content = ttk.Frame(self.canvas)
+
+        self.window_id = self.canvas.create_window((0, 0), window=self.content, anchor="nw")
+
+        self.canvas.configure(yscrollcommand=self.scrollbar.set)
+
+        self.canvas.pack(side="left", fill="both", expand=True)
+        self.scrollbar.pack(side="right", fill="y")
+
+        self.content.bind("<Configure>", self.on_content_configure)
+        self.canvas.bind("<Configure>", self.on_canvas_configure)
+
+        self.canvas.bind_all("<MouseWheel>", self.on_mousewheel)
+        self.canvas.bind_all("<Button-4>", self.on_mousewheel_linux)
+        self.canvas.bind_all("<Button-5>", self.on_mousewheel_linux)
+
+    def on_content_configure(self, event):
+        self.canvas.configure(scrollregion=self.canvas.bbox("all"))
+
+    def on_canvas_configure(self, event):
+        self.canvas.itemconfigure(self.window_id, width=event.width)
+
+    def on_mousewheel(self, event):
+        self.canvas.yview_scroll(int(-1 * (event.delta / 120)), "units")
+
+    def on_mousewheel_linux(self, event):
+        if event.num == 4:
+            self.canvas.yview_scroll(-3, "units")
+        elif event.num == 5:
+            self.canvas.yview_scroll(3, "units")
+
+
 class SysMonApp:
     def __init__(self, root):
         self.root = root
         self.root.title("LLLM SysMon")
-        self.root.geometry("900x820")
-        self.root.minsize(780, 650)
+        self.root.geometry("900x700")
+        self.root.minsize(760, 520)
 
         self.style = ttk.Style()
         self.style.theme_use("clam")
 
-        self.main = ttk.Frame(root, padding=14)
+        self.outer = ttk.Frame(root)
+        self.outer.pack(fill="both", expand=True)
+
+        self.scroller = ScrollableFrame(self.outer)
+        self.scroller.pack(fill="both", expand=True)
+
+        self.main = ttk.Frame(self.scroller.content, padding=14)
         self.main.pack(fill="both", expand=True)
 
         title = ttk.Label(

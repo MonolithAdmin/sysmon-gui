@@ -46,5 +46,3 @@ echo "  sysmon-gui"
 echo
 echo "You can also search your application menu for:"
 echo "  SysMon GUI"
-
-chmod +x install.sh

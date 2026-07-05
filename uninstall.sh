@@ -6,4 +6,4 @@ rm -f "$HOME/.local/share/applications/sysmon-gui.desktop"
 
 update-desktop-database "$HOME/.local/share/applications" 2>/dev/null || true
 
-echo "sysmon-gui removed."
+echo "SysMon GUI removed."

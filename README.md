@@ -19,6 +19,8 @@ Built for Ubuntu systems running Nvidia GPUs.
 ## Install
 
 Run:
+    sudo apt update
+    sudo apt install -y curl
 
     curl -fsSL https://raw.githubusercontent.com/MonolithAdmin/sysmon-gui/main/install.sh | bash
 
